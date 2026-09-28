@@ -3,6 +3,7 @@ package journal
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/wyw14/solo-038/internal/model"
 )
@@ -14,12 +15,28 @@ type RecoveredState struct {
 	EventCount     int
 }
 
+// releasedSegment identifies a committed segment independently of when it
+// closed, so a retried commit of the same segment is released only once.
+type releasedSegment struct {
+	JobID          model.JobID
+	JobGeneration  uint64
+	RollGeneration uint64
+	StartMeter     float64
+	EndMeter       float64
+	OpenedAt       time.Time
+}
+
+func segmentOf(interval model.Interval) releasedSegment {
+	return releasedSegment{JobID: interval.JobID, JobGeneration: interval.JobGeneration, RollGeneration: interval.RollGeneration, StartMeter: interval.StartMeter, EndMeter: interval.EndMeter, OpenedAt: interval.OpenedAt.UTC()}
+}
+
 func Replay(events []model.Event) (RecoveredState, error) {
 	ordered := append([]model.Event(nil), events...)
 	sort.SliceStable(ordered, func(left, right int) bool {
 		return ordered[left].At.Before(ordered[right].At)
 	})
 	state := RecoveredState{}
+	released := map[releasedSegment]bool{}
 	for _, event := range ordered {
 		if err := event.Validate(); err != nil {
 			return RecoveredState{}, err
@@ -43,7 +60,9 @@ func Replay(events []model.Event) (RecoveredState, error) {
 			if err != nil {
 				return RecoveredState{}, err
 			}
-			if record.Released {
+			segment := segmentOf(record.Interval)
+			if record.Released && !released[segment] {
+				released[segment] = true
 				state.ReleasedRanges = append(state.ReleasedRanges, record.Interval)
 			}
 		}
